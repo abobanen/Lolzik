@@ -1,86 +1,70 @@
-
-import requests
-from bs4 import BeautifulSoup
+import asyncio
+import logging
+import time
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import asyncio
-import time
+import requests
+from bs4 import BeautifulSoup
 
-def parse_lzt_market(url):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers)
-    soup = BeautifulSoup(response.text, "html.parser")
+TOKEN = "7747932663:AAGjBtgIp9di9aLZ09bk8-Gm5k802RfozCs"
+user_tasks = {}
 
-    items_data = []
-
-    items = soup.find_all("div", class_="market__product market__product--grid")
-    for item in items:
-        title_div = item.find("div", class_="market__product-title")
-        price_div = item.find("div", class_="market__product-price")
-        link_tag = item.find("a", class_="market__product-link")
-
-        if title_div and price_div and link_tag:
-            title = title_div.text.strip()
-            price = price_div.text.strip().replace("₽", "").replace(" ", "").replace("\xa0", "")
-            link = "https://lzt.market" + link_tag["href"]
-
-            items_data.append({
-                "title": title,
-                "price": int(price),
-                "link": link
-            })
-
-    return items_data
+logging.basicConfig(level=logging.INFO)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Отправь мне ссылку на поиск lzt.market через /track <ссылка>, и я буду следить за новыми товарами и снижением цен в течение часа.")
+    await update.message.reply_text("Привет! Пришли мне ссылку на товар с lzt.market, и я буду следить за ним 1 час.")
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Используй команду так: /track <ссылка>")
+    url = " ".join(context.args)
+    if not url.startswith("https://lzt.market"):
+        await update.message.reply_text("Пожалуйста, пришли корректную ссылку на товар с сайта lzt.market")
         return
 
-    url = context.args[0]
-    if not url.startswith("https://lzt.market/"):
-        await update.message.reply_text("Ссылка должна начинаться с https://lzt.market/")
-        return
+    chat_id = update.effective_chat.id
+    await update.message.reply_text("Начинаю отслеживание товара на 1 час.")
 
-    await update.message.reply_text(f"Отслеживаю: {url} — 1 час. Уведомлю о новых товарах и снижениях цен.")
+    async def monitor():
+        logging.info(f"[{chat_id}] Старт отслеживания: {url}")
+        last_seen_ids = set()
+        last_prices = {}
 
-    known_items = {}
-    start_time = time.time()
+        start_time = time.time()
+        while time.time() - start_time < 3600:
+            try:
+                response = requests.get(url, timeout=10)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                items = soup.select(".market-item")
 
-    while time.time() - start_time < 3600:
-        try:
-            current_items = parse_lzt_market(url)
-            for item in current_items:
-                item_id = item["link"]
+                current_ids = set()
+                for item in items:
+                    item_id = item.get("data-id")
+                    current_ids.add(item_id)
+                    price_tag = item.select_one(".price")
+                    price = int(price_tag.text.replace("₽", "").strip()) if price_tag else 0
 
-                if item_id not in known_items:
-                    known_items[item_id] = item["price"]
-                    await update.message.reply_text(
-                        f"**[НОВЫЙ ТОВАР]**\n{item['title']}\nЦена: {item['price']}₽\n{item['link']}",
-                        parse_mode="Markdown"
-                    )
-                elif item["price"] < known_items[item_id]:
-                    old_price = known_items[item_id]
-                    known_items[item_id] = item["price"]
-                    await update.message.reply_text(
-                        f"**[СНИЖЕНИЕ ЦЕНЫ]**\n{item['title']}\nБыло: {old_price}₽\nСтало: {item['price']}₽\n{item['link']}",
-                        parse_mode="Markdown"
-                    )
-        except Exception as e:
-            await update.message.reply_text(f"Ошибка при парсинге: {e}")
-        
-        await asyncio.sleep(60)
+                    if item_id not in last_seen_ids:
+                        item_link = f"https://lzt.market/{item_id}"
+                        await context.bot.send_message(chat_id=chat_id, text=f"Новый товар: {item_link}")
+                    elif item_id in last_prices and price < last_prices[item_id]:
+                        item_link = f"https://lzt.market/{item_id}"
+                        await context.bot.send_message(chat_id=chat_id, text=f"Цена снизилась: {item_link} — {price}₽")
 
-    await update.message.reply_text("Отслеживание завершено. Прошёл 1 час.")
+                    last_prices[item_id] = price
+
+                last_seen_ids = current_ids
+                await asyncio.sleep(60)
+
+            except Exception as e:
+                logging.error(f"[{chat_id}] Ошибка при парсинге: {e}")
+                await asyncio.sleep(60)
+
+    task = asyncio.create_task(monitor())
+    user_tasks[chat_id] = task
 
 if __name__ == "__main__":
-    app = ApplicationBuilder().token("7747932663:AAGjBtgIp9di9aLZ09bk8-Gm5k802RfozCs").build()
-
+    print("Запуск бота...")
+    app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("track", track))
-
-    print("Бот запущен.")
+    print("Бот инициализирован. Запускаем polling...")
     app.run_polling()
