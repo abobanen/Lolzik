@@ -1,70 +1,55 @@
-import asyncio
 import logging
-import time
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import requests
 from bs4 import BeautifulSoup
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+import asyncio
 
-TOKEN = "7747932663:AAGjBtgIp9di9aLZ09bk8-Gm5k802RfozCs"
-user_tasks = {}
+TOKEN = '7747932663:AAGjBtgIp9di9aLZ09bk8-Gm5k802RfozCs'
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+URL = "https://lzt.market/steam/?rt=nomatter&mm_ban=nomatter&order_by=pdate_to_down_upload"
+
+user_data = {}
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+}
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Пришли мне ссылку на товар с lzt.market, и я буду следить за ним 1 час.")
+    user_id = update.effective_user.id
+    await context.bot.send_message(chat_id=user_id, text=f"[{user_id}] Старт отслеживания: {URL}")
+    user_data[user_id] = {"last_title": None}
+    asyncio.create_task(monitor(update, context, user_id))
 
-async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = " ".join(context.args)
-    if not url.startswith("https://lzt.market"):
-        await update.message.reply_text("Пожалуйста, пришли корректную ссылку на товар с сайта lzt.market")
-        return
 
-    chat_id = update.effective_chat.id
-    await update.message.reply_text("Начинаю отслеживание товара на 1 час.")
+async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    while True:
+        try:
+            response = requests.get(URL, headers=HEADERS, timeout=10)
+            soup = BeautifulSoup(response.text, "html.parser")
+            listing = soup.find("div", class_="market-lot market-lot-hover")
 
-    async def monitor():
-        logging.info(f"[{chat_id}] Старт отслеживания: {url}")
-        last_seen_ids = set()
-        last_prices = {}
+            if not listing:
+                raise Exception("Не удалось найти лот")
 
-        start_time = time.time()
-        while time.time() - start_time < 3600:
-            try:
-                response = requests.get(url, timeout=10)
-                soup = BeautifulSoup(response.text, 'html.parser')
-                items = soup.select(".market-item")
+            title = listing.find("div", class_="title").text.strip()
+            link = listing.find("a", href=True)["href"]
 
-                current_ids = set()
-                for item in items:
-                    item_id = item.get("data-id")
-                    current_ids.add(item_id)
-                    price_tag = item.select_one(".price")
-                    price = int(price_tag.text.replace("₽", "").strip()) if price_tag else 0
+            if user_data[user_id]["last_title"] != title:
+                user_data[user_id]["last_title"] = title
+                full_url = f"https://lzt.market{link}"
+                await context.bot.send_message(chat_id=user_id, text=f"Новый лот: {title}\n{full_url}")
+        except Exception as e:
+            logger.error(f"[{user_id}] Ошибка при парсинге: {e}")
+        await asyncio.sleep(30)
 
-                    if item_id not in last_seen_ids:
-                        item_link = f"https://lzt.market/{item_id}"
-                        await context.bot.send_message(chat_id=chat_id, text=f"Новый товар: {item_link}")
-                    elif item_id in last_prices and price < last_prices[item_id]:
-                        item_link = f"https://lzt.market/{item_id}"
-                        await context.bot.send_message(chat_id=chat_id, text=f"Цена снизилась: {item_link} — {price}₽")
 
-                    last_prices[item_id] = price
-
-                last_seen_ids = current_ids
-                await asyncio.sleep(60)
-
-            except Exception as e:
-                logging.error(f"[{chat_id}] Ошибка при парсинге: {e}")
-                await asyncio.sleep(60)
-
-    task = asyncio.create_task(monitor())
-    user_tasks[chat_id] = task
-
-if __name__ == "__main__":
-    print("Запуск бота...")
-    app = ApplicationBuilder().token(TOKEN).build()
+if __name__ == '__main__':
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("track", track))
-    print("Бот инициализирован. Запускаем polling...")
     app.run_polling()
+        
